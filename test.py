@@ -15,6 +15,20 @@ import pandas as pd
 from multiprocessing import Pool, Manager
 from datetime import timedelta
 
+
+def addtransaction(entry,exit,type):
+    if entry==exit:
+        return 0
+    if type=='buy':
+        n_exit=exit * 0.99
+        n_entry=entry * 1.01
+        return (n_exit-n_entry)
+    else:
+        n_entry=entry * 0.99 
+        n_exit=exit * 1.01
+        return (n_entry-n_exit)
+
+
 def calculate_sar(df, acceleration=0.02, maximum=0.2):
     """
     Calculate Parabolic SAR for a given dataframe containing price data.
@@ -178,54 +192,73 @@ def correct_price_on_expiry(strike,spot,option_type):
     if option_type=='call':
         return max(spot-strike,0)
     if option_type=='put':
-        return min(strike-spot,0)
+        return max(strike-spot,0)
 
 import multiprocessing
 import pandas as pd
 from datetime import timedelta
 
 # Define the function to process each ticker in parallel
-def process_ticker(ticker, start_year, end_year, exposure):
+def process_ticker(ticker, start_year, end_year, exposure,target_delta):
     option_trades = []
     stock_data = pd.read_csv(f"./Stocks Data/{ticker}_EQ_EOD.csv")
 
     # Use the function this way:
+
+    #adding psar values
     result = calculate_sar(stock_data)
     stock_data['SAR'] = result['SAR']
     stock_data['Trend'] = result['Trend']
+
+    #volatility
     result =calculate_historical_volatility(stock_data)
     stock_data['Volatility'] = result['volatility']
+
+    #convert date to common format
     stock_data['Date'] = pd.to_datetime(stock_data['Date']).dt.strftime('%Y-%m-%d')
 
+
+    #options data
     op_data=pd.read_csv(f"./Stocks Data/{ticker}_Opt_EOD.csv")
     op_data['Date'] = pd.to_datetime(op_data['Date']).dt.strftime('%Y-%m-%d')
     op_data[['Strike Price', 'Extracted Option Type']] = op_data['Ticker'].apply(extract_strike_price_and_type).apply(pd.Series)
+
+
+    prev_trend=1 #assume upward trend
     for year in range(start_year, end_year):
         for month in range(1, 13):
+            #last friday
             lf=last_friday_of_previous_month(year, month)
+            #last thursday
             lt = last_thursday(year, month)
 
             lf_str = lf.strftime('%Y-%m-%d')
             lt_str = lt.strftime('%Y-%m-%d')
-            #  Entry
+
+
+            # filter stock and options data in range
             filter_stock_data = stock_data[(stock_data['Date'] >= lf_str) & (stock_data['Date'] <= lt_str)]
             filter_op_data = op_data[(op_data['Date'] >= lf_str) & (op_data['Date'] <= lt_str)]
-            
+
 
             current_date = lf
             is_option_open=False
             valid_expriy_day=None 
             in_trade_option_type=None
+
             while current_date <= lt:
+
                 current_date_str=current_date.strftime('%Y-%m-%d')
                 stock_data_today=filter_stock_data[filter_stock_data['Date']==current_date_str]
                 options_data_today=filter_op_data[filter_op_data['Date']==current_date_str]
                 time_to_maturity = calculate_time_to_maturity(current_date,lt)
 
                 if len(stock_data_today)==0  or len(options_data_today)==0:
-
+                    if len(stock_data_today)>0:
+                        trend=stock_data_today['Trend'].values[0]
+                        prev_trend=trend
                     if (current_date==lt) and (valid_expriy_day!=None):
-                    
+                        #get valid expiry day data
                         valid_expriy_day_str=valid_expriy_day.strftime('%Y-%m-%d')
                         stock_data_today=filter_stock_data[filter_stock_data['Date']==valid_expriy_day_str]
                         options_data_today=filter_op_data[filter_op_data['Date']==valid_expriy_day_str]
@@ -233,13 +266,15 @@ def process_ticker(ticker, start_year, end_year, exposure):
                         spot=stock_data_today['EQ_Close'].values[0]
                         volatility=stock_data_today['Volatility'].values[0]
                         trend=stock_data_today['Trend'].values[0]
+
                         option_price_close = get_option_price(options_data_today, current_position['Strike'], current_position['Option Type'], 'Close')
-                        current_position['Exit Price'] = option_price_close if option_price_close is not None else correct_price_on_expiry(current_position['Strike'],spot,current_position['Option Type'])
+                        current_position['Exit Price'] = option_price_close if option_price_close is not None else current_position['Initial Price']
                         current_position['Exit Delta'] = calculate_greeks(spot, current_position['Strike'], time_to_maturity, 0.07, volatility, current_position['Option Type'])
-                        current_position['PNL']=(current_position['Initial Price']-current_position['Exit Price'])*current_position['Lot']
+                        current_position['PNL']=addtransaction(current_position['Initial Price'],current_position['Exit Price'],'sell')*current_position['Lot']
                         current_position['Exit Date']=current_date_str
                         option_trades.append(current_position.copy())
                         is_option_open=False
+                        break
                     current_date+=timedelta(days=1)
                     continue
 
@@ -247,20 +282,34 @@ def process_ticker(ticker, start_year, end_year, exposure):
                 spot=stock_data_today['EQ_Close'].values[0]
                 volatility=stock_data_today['Volatility'].values[0]
                 trend=stock_data_today['Trend'].values[0]
-                
+
+                #SL CHECKING
                 if is_option_open==True:
                     now_trend='call'
                     if trend==1:
                         now_trend='put'
                     option_price_close = get_option_price(options_data_today, current_position['Strike'], current_position['Option Type'], 'Close')
-                    if in_trade_option_type!=now_trend:
-                        current_position['Exit Price'] = option_price_close if option_price_close is not None else current_position['Initial Price']
+
+                    if current_date==lt:
+                        current_position['Exit Price'] = option_price_close if option_price_close is not None else correct_price_on_expiry(current_position['Strike'],spot,current_position['Option Type'])
                         current_position['Exit Delta'] = calculate_greeks(spot, current_position['Strike'], time_to_maturity, 0.07, volatility, current_position['Option Type'])
-                        current_position['PNL']=(current_position['Initial Price']-current_position['Exit Price'])*current_position['Lot']
+                        current_position['PNL']=addtransaction(current_position['Initial Price'],current_position['Exit Price'],'sell')*current_position['Lot']
                         current_position['Exit Date']=current_date_str
                         option_trades.append(current_position.copy())
                         is_option_open=False
-                        option_target = find_option_by_delta(options_data_today, spot, time_to_maturity, volatility, 0.25 if trend == -1 else -0.25, 'call' if trend == -1 else 'put')
+                        #initial previous trend
+                        prev_trend=trend
+                        break
+
+                    
+                    if in_trade_option_type!=now_trend:
+                        current_position['Exit Price'] = option_price_close if option_price_close is not None else current_position['Initial Price']
+                        current_position['Exit Delta'] = calculate_greeks(spot, current_position['Strike'], time_to_maturity, 0.07, volatility, current_position['Option Type'])
+                        current_position['PNL']=addtransaction(current_position['Initial Price'],current_position['Exit Price'],'sell')*current_position['Lot']
+                        current_position['Exit Date']=current_date_str
+                        option_trades.append(current_position.copy())
+                        is_option_open=False
+                        option_target = find_option_by_delta(options_data_today, spot, time_to_maturity, volatility, target_delta if trend == -1 else -target_delta, 'call' if trend == -1 else 'put')
                         if option_target is not None:
                             option_lot_size=exposure/spot
                             current_position={
@@ -272,48 +321,42 @@ def process_ticker(ticker, start_year, end_year, exposure):
                                 'Bought Delta':option_target['Calculated_Delta'],
                                 'Lot':option_lot_size,
                                 'Expiry Month':lt.strftime('%Y-%m-%d'),
-                                'Target Delta':0.25 
+                                'Target Delta':target_delta ,
+                                'Open':0
                             }
                             in_trade_option_type=option_target['Extracted Option Type']
                             is_option_open=True
 
-                    if current_date==lt:
-                        option_price_close = get_option_price(options_data_today, current_position['Strike'], current_position['Option Type'], 'Close')
-                        current_position['Exit Price'] = option_price_close if option_price_close is not None else correct_price_on_expiry(current_position['Strike'],spot,current_position['Option Type'])
-                        current_position['Exit Delta'] = calculate_greeks(spot, current_position['Strike'], time_to_maturity, 0.07, volatility, current_position['Option Type'])
-                        current_position['PNL']=(current_position['Initial Price']-current_position['Exit Price'])*current_position['Lot']
-                        current_position['Exit Date']=current_date_str
-                        option_trades.append(current_position.copy())
-                        is_option_open=False
-
-                
                 if is_option_open==False:
-                    option_target = find_option_by_delta(options_data_today, spot, time_to_maturity, volatility, 0.25 if trend == -1 else -0.25, 'call' if trend == -1 else 'put')
+                    option_target = find_option_by_delta(options_data_today, spot, time_to_maturity, volatility, target_delta if prev_trend == -1 else -target_delta, 'call' if prev_trend == -1 else 'put')
                     if option_target is not None:
+                        #Month Start Enter AT Open
                         option_lot_size=exposure/spot
                         current_position={
                             'Date':current_date_str,
                             'Entry':option_target['Ticker'],
                             'Strike':option_target['Strike Price'],
-                            'Initial Price': option_target['Close'],
+                            'Initial Price': option_target['Open'],
                             'Option Type':option_target['Extracted Option Type'],
                             'Bought Delta':option_target['Calculated_Delta'],
                             'Lot':option_lot_size,
                             'Expiry Month':lt.strftime('%Y-%m-%d'),
-                            'Target Delta':0.25 
+                            'Target Delta':target_delta,
+                            'Open':1,
                         }
                         in_trade_option_type=option_target['Extracted Option Type']
                         is_option_open=True
 
+                prev_trend=trend
                 current_date+=timedelta(days=1)
                 
 
     return option_trades
 
 # Define the function for multiprocessing
-def get_data_multiprocessing(tickers, start_year, end_year, exposure):
+def get_data_multiprocessing(tickers, start_year, end_year, exposure,target_delta):
     with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
-        results = pool.starmap(process_ticker, [(ticker, start_year, end_year, exposure) for ticker in tickers])
+        results = pool.starmap(process_ticker, [(ticker, start_year, end_year, exposure,target_delta) for ticker in tickers])
 
     # Flatten the list of lists
     all_trades = [trade for result in results for trade in result]
@@ -330,7 +373,8 @@ if __name__ == '__main__':
     start_year = 2019
     end_year = 2025
     exposure = 700000
+    target_delta=0.35
 
-    df_trades = get_data_multiprocessing(tickers, start_year, end_year, exposure)
+    df_trades = get_data_multiprocessing(tickers, start_year, end_year, exposure,target_delta)
     df = pd.DataFrame(df_trades)
-    df.to_csv('trades.csv', index=False)
+    df.to_csv(f'trades_{target_delta}.csv', index=False)
