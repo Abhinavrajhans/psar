@@ -160,9 +160,9 @@ def process_ticker(ticker, start_year, end_year, exposure,target_delta,dte,sl,op
     for year in range(start_year, end_year):
         for month in range(1, 13):
             #last friday
-            lf=last_friday_of_previous_month(year, month)
             #last thursday
             lt = last_thursday(year, month)
+            lf = lt - timedelta(days=dte)
 
             lf_str = lf.strftime('%Y-%m-%d')
             lt_str = lt.strftime('%Y-%m-%d')
@@ -205,7 +205,7 @@ def process_ticker(ticker, start_year, end_year, exposure,target_delta,dte,sl,op
                         option_price_close = get_option_price(options_data_today, current_position['Option Strike'], option_type, 'Close')
                         option_exit_price = option_price_close
                         if option_exit_price==None:
-                            option_exit_price=correct_price_on_expiry(current_position['Option Strike'],spot,current_position['Option Type'])
+                            option_exit_price=current_position['Option Initial Price']
                         current_position['Options PNL'] = give_pnl('SELL',current_position['Option Initial Price'],option_exit_price, current_position['lot_size'])
                         current_position['Option Close Date'] = current_date
                         current_position['Option Final Price'] = option_exit_price
@@ -243,6 +243,7 @@ def process_ticker(ticker, start_year, end_year, exposure,target_delta,dte,sl,op
                             current_position['Option SL'] = 'Overnight SL Hit'
                             option_trades.append(current_position.copy())
                             is_option_open = False
+                            break
 
                     if (option_price_high!=None) and (is_option_open==True):
                         if option_price_high >= (1 + sl) * current_position['Option Initial Price']:
@@ -255,33 +256,25 @@ def process_ticker(ticker, start_year, end_year, exposure,target_delta,dte,sl,op
                             current_position['Option SL'] = 'Intraday SL Hit'
                             option_trades.append(current_position.copy())
                             is_option_open = False
+                            break
                     
                     if (current_date==lt) and (is_option_open==True) :
                         #sell at expiry
                         option_exit_price = option_price_close
                         print("expiry sl hit"," ",option_exit_price)
                         if option_exit_price==None:
-                            option_exit_price=correct_price_on_expiry(current_position['Option Strike'],spot,current_position['Option Type'])
+                            option_exit_price=current_position['Option Initial Price']
                         current_position['Options PNL'] = give_pnl('SELL',current_position['Option Initial Price'],option_exit_price, current_position['lot_size'])
                         current_position['Option Close Date'] = current_date
                         current_position['Option Final Price'] = option_exit_price
                         current_position['Option SL'] = 'Expiry'
                         option_trades.append(current_position.copy())
                         is_option_open = False
-
-
-                
-
-            
-
-                    
-                       
+                        break
 
                 if is_option_open==False :
                     #stock option sell
                     option_target = find_option_by_delta(options_data_today, spot, time_to_maturity, volatility, target_delta, option_type)
-                    
-
                     if option_target is not None:
                         #Month Start Enter AT Open
                         option_lot_size=exposure/spot
@@ -296,7 +289,6 @@ def process_ticker(ticker, start_year, end_year, exposure,target_delta,dte,sl,op
                             'Expiry Month':lt.strftime('%Y-%m-%d'),
                             'Target Delta':target_delta,
                         }
-                        in_trade_option_type=option_target['Extracted Option Type']
                         is_option_open=True
                         print(current_position)
 
@@ -316,14 +308,21 @@ def get_data_multiprocessing(tickers, start_year, end_year, exposure,target_delt
 
 
 if __name__ == '__main__':
-    tickers = ["RELIANCE"]
+    tickers = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "HINDUNILVR", "KOTAKBANK", "SBIN",
+           "BHARTIARTL", "ITC", "ASIANPAINT", "BAJFINANCE", "MARUTI", "AXISBANK", "LT", "HCLTECH",
+           "SUNPHARMA", "WIPRO", "ULTRACEMCO", "TITAN", "TECHM", "NESTLEIND", "JSWSTEEL", "TATASTEEL",
+           "POWERGRID", "ONGC", "COALINDIA", "INDUSINDBK", "BAJAJFINSV", "GRASIM", "CIPLA", "ADANIPORTS",
+           "TATAMOTORS", "DRREDDY", "BRITANNIA", "HEROMOTOCO", "DIVISLAB", "EICHERMOT", "SHREECEM",
+           "APOLLOHOSP", "UPL", "TATACONSUM", "BAJAJ_AUTO", "HINDALCO", "SBILIFE", "VEDL"]
     start_year = 2019
     end_year = 2025
     exposure = 700000
     target_delta=0.35
     dte=5
     sl=2
-    option_type='call'
+    option_type='put'
+    if option_type=='put':
+        target_delta=-target_delta
 
     df_trades = get_data_multiprocessing(tickers, start_year, end_year, exposure,target_delta,dte,sl,option_type)
     df = pd.DataFrame(df_trades)
