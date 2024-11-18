@@ -104,6 +104,11 @@ def get_option_price(options_data, strike_price, option_type='call', ohlc='Close
     option_row = options_data[(options_data['Strike Price'] == strike_price) & (options_data['Extracted Option Type'] == option_type)]
     return option_row[ohlc].values[0] if not option_row.empty else None
 
+def get_option_price_nifty(nifty_options_data,  ticker , ohlc='Close'):
+    
+    option_row = nifty_options_data[(nifty_options_data['Ticker'] == ticker)]
+    return option_row[ohlc].values[0] if not option_row.empty else None
+
 
 
 def correct_price_on_expiry(strike,spot,option_type):
@@ -130,6 +135,7 @@ from datetime import timedelta
 
 # Define the function to process each ticker in parallel
 def process_ticker(ticker, start_year, end_year, exposure,target_delta,dte,sl,option_type):
+    print('.....Processing', ticker)
     option_trades = []
     stock_data = pd.read_csv(f"./Stocks Data/{ticker}_EQ_EOD.csv")
     nifty_index_data = pd.read_csv('./nifty_combined_sorted_data.csv')
@@ -153,7 +159,7 @@ def process_ticker(ticker, start_year, end_year, exposure,target_delta,dte,sl,op
     nifty_options_data = pd.read_csv('./Nifty_MonthlyI_Opt2019.csv')
     nifty_options_data['Date'] = pd.to_datetime(nifty_options_data['Date']).dt.strftime('%Y-%m-%d')
     nifty_options_data[['Strike Price', 'Extracted Option Type']] = nifty_options_data['Ticker'].apply(extract_strike_price_and_type).apply(pd.Series)
-
+    print('.....Processing Started', ticker)
 
 
     
@@ -179,7 +185,6 @@ def process_ticker(ticker, start_year, end_year, exposure,target_delta,dte,sl,op
             current_date = lf
             
             is_option_open=False
-            is_nifty_option_open=False
             valid_expriy_day=None 
             
             while current_date <= lt:
@@ -192,24 +197,39 @@ def process_ticker(ticker, start_year, end_year, exposure,target_delta,dte,sl,op
                 time_to_maturity = calculate_time_to_maturity(current_date,lt)
 
 
-                if len(stock_data_today)==0 or len(options_data_today)==0:
+                if len(stock_data_today)==0 or len(options_data_today)==0 or len(nifty_op_data_today)==0 or len(nifty_index_data_today)==0:
                     if current_date==valid_expriy_day:
                         valid_expriy_day_str=valid_expriy_day.strftime('%Y-%m-%d')
+                        #expiry Day Data
                         stock_data_today=filter_stock_data[filter_stock_data['Date']==valid_expriy_day_str]
                         options_data_today=filter_op_data[filter_op_data['Date']==valid_expriy_day_str]
-                        # nifty_op_data_today=filter_nifty_op_data[filter_nifty_op_data['Date']==valid_expriy_day_str]
-                        # nifty_index_data_today=filter_nifty_index_data[filter_nifty_index_data['Date']==valid_expriy_day_str]
+                        nifty_op_data_today=filter_nifty_op_data[filter_nifty_op_data['Date']==valid_expriy_day_str]
+                        nifty_index_data_today=filter_nifty_index_data[filter_nifty_index_data['Date']==valid_expriy_day_str]
+                        #imp parameters
                         time_to_maturity = calculate_time_to_maturity(valid_expriy_day,lt)
                         spot=stock_data_today['EQ_Close'].values[0]
+                        spot_nifty=nifty_index_data_today['Close'].values[0]
                         volatility=stock_data_today['Volatility'].values[0]
+                        nifty_volatility=nifty_index_data_today['Volatility'].values[0]
+
                         option_price_close = get_option_price(options_data_today, current_position['Option Strike'], option_type, 'Close')
+                        nifty_option_price_close = get_option_price_nifty(nifty_op_data_today, current_position['Entry Nifty'], 'Close')
+
                         option_exit_price = option_price_close
+                        nifty_option_exit_price = nifty_option_price_close
                         if option_exit_price==None:
                             option_exit_price=current_position['Option Initial Price']
+                        if nifty_option_exit_price==None:
+                            nifty_option_exit_price=current_position['Nifty Option Initial Price']
+
                         current_position['Options PNL'] = give_pnl('SELL',current_position['Option Initial Price'],option_exit_price, current_position['lot_size'])
                         current_position['Option Close Date'] = current_date
                         current_position['Option Final Price'] = option_exit_price
                         current_position['Option SL'] = 'Expiry'
+                        current_position['Exit Spot'] = spot
+                        current_position['Nifty Options PNL'] = give_pnl('BUY',current_position['Nifty Option Initial Price'],nifty_option_exit_price, current_position['Nifty lot_size'])  # Selling 2 lots
+                        current_position['Nifty Option Final Price'] = nifty_option_exit_price
+                        current_position['Nifty Exit Spot'] = spot
                         option_trades.append(current_position.copy())
                         is_option_open = False
 
@@ -227,20 +247,37 @@ def process_ticker(ticker, start_year, end_year, exposure,target_delta,dte,sl,op
 
 
                 if is_option_open==True:
-                    print(current_position)
+                    
                     option_price_high = get_option_price(options_data_today, current_position['Option Strike'], option_type, 'High')
                     option_price_open = get_option_price(options_data_today, current_position['Option Strike'], option_type, 'Open')
                     option_price_close= get_option_price(options_data_today, current_position['Option Strike'], option_type, 'Close')
+
+                    nifty_option_price_open = get_option_price_nifty(nifty_op_data_today, current_position['Entry Nifty'], 'Open')
+                    nifty_option_price_close = get_option_price_nifty(nifty_op_data_today, current_position['Entry Nifty'], 'Close')
+                   
+
                     
                     if (option_price_open!=None) and (is_option_open==True):
                         if option_price_open >= (1 + sl) * current_position['Option Initial Price']:
                             #sell at open
+                            #stock option
                             option_exit_price = option_price_open
-                            print("overnight sl hit"," ",option_exit_price)
                             current_position['Options PNL'] = give_pnl('SELL',current_position['Option Initial Price'],option_exit_price, current_position['lot_size'])  # Selling 2 lots
                             current_position['Option Close Date'] = current_date
                             current_position['Option Final Price'] = option_exit_price
                             current_position['Option SL'] = 'Overnight SL Hit'
+                            current_position['Exit Spot'] = spot
+
+                            #nifty option
+                            nifty_option_exit_price = nifty_option_price_open
+                            if nifty_option_exit_price==None:
+                                nifty_option_exit_price=current_position['Nifty Option Initial Price']
+                            current_position['Nifty Options PNL'] = give_pnl('BUY',current_position['Nifty Option Initial Price'],nifty_option_exit_price, current_position['Nifty lot_size'])  # Selling 2 lots
+                            current_position['Nifty Option Final Price'] = nifty_option_exit_price
+                            current_position['Nifty Exit Spot'] = spot
+
+
+
                             option_trades.append(current_position.copy())
                             is_option_open = False
                             break
@@ -248,49 +285,81 @@ def process_ticker(ticker, start_year, end_year, exposure,target_delta,dte,sl,op
                     if (option_price_high!=None) and (is_option_open==True):
                         if option_price_high >= (1 + sl) * current_position['Option Initial Price']:
                             #sell at stoploss
+                            #stock option
                             option_exit_price = (1 + sl) * current_position['Option Initial Price']
-                            print("intraday sl hit"," ",option_exit_price)
                             current_position['Options PNL'] = give_pnl('SELL',current_position['Option Initial Price'],option_exit_price, current_position['lot_size'])
                             current_position['Option Close Date'] = current_date
                             current_position['Option Final Price'] = option_exit_price
                             current_position['Option SL'] = 'Intraday SL Hit'
+                            current_position['Exit Spot'] = spot
+
+                            #nifty option
+                            nifty_option_exit_price = nifty_option_price_close
+                            if nifty_option_exit_price==None:
+                                nifty_option_exit_price=current_position['Nifty Option Initial Price']
+                            current_position['Nifty Options PNL'] = give_pnl('BUY',current_position['Nifty Option Initial Price'],nifty_option_exit_price, current_position['Nifty lot_size'])  # Selling 2 lots
+                            current_position['Nifty Option Final Price'] = nifty_option_exit_price
+                            current_position['Nifty Exit Spot'] = spot
+
                             option_trades.append(current_position.copy())
                             is_option_open = False
                             break
                     
                     if (current_date==lt) and (is_option_open==True) :
                         #sell at expiry
+                        #stock option
                         option_exit_price = option_price_close
-                        print("expiry sl hit"," ",option_exit_price)
                         if option_exit_price==None:
                             option_exit_price=current_position['Option Initial Price']
                         current_position['Options PNL'] = give_pnl('SELL',current_position['Option Initial Price'],option_exit_price, current_position['lot_size'])
                         current_position['Option Close Date'] = current_date
                         current_position['Option Final Price'] = option_exit_price
                         current_position['Option SL'] = 'Expiry'
+                        current_position['Exit Spot'] = spot
+
+                        #nifty option
+                        nifty_option_exit_price = nifty_option_price_close
+                        if nifty_option_exit_price==None:
+                            nifty_option_exit_price=current_position['Nifty Option Initial Price']
+                        current_position['Nifty Options PNL'] = give_pnl('BUY',current_position['Nifty Option Initial Price'],nifty_option_exit_price, current_position['Nifty lot_size'])  # Selling 2 lots
+                        current_position['Nifty Option Final Price'] = nifty_option_exit_price
+                        current_position['Nifty Exit Spot'] = spot
+
                         option_trades.append(current_position.copy())
                         is_option_open = False
                         break
+                
+                
 
                 if is_option_open==False :
                     #stock option sell
                     option_target = find_option_by_delta(options_data_today, spot, time_to_maturity, volatility, target_delta, option_type)
+                    option_target_nifty=find_option_by_delta(nifty_op_data_today, spot_nifty, time_to_maturity, nifty_volatility, target_delta, option_type)
                     if option_target is not None:
                         #Month Start Enter AT Open
                         option_lot_size=exposure/spot
+                        nifty_lot_size=exposure/spot_nifty
                         current_position={
                             'Date':current_date_str,
                             'Entry':option_target['Ticker'],
                             'Option Strike':option_target['Strike Price'],
+                            'Entry Spot':spot,
                             'Option Initial Price': option_target['Close'],
                             'Option Type':option_target['Extracted Option Type'],
                             'Bought Delta':option_target['Calculated_Delta'],
                             'lot_size':option_lot_size,
                             'Expiry Month':lt.strftime('%Y-%m-%d'),
                             'Target Delta':target_delta,
+                            'Entry Nifty':option_target_nifty['Ticker'],
+                            'Option Strike Nifty':option_target_nifty['Strike Price'],
+                            'Entry Spot Nifty':spot_nifty,
+                            'Nifty Option Initial Price': option_target_nifty['Close'],
+                            'Nifty Option Type':option_target_nifty['Extracted Option Type'],
+                            'Nifty Bought Delta':option_target_nifty['Calculated_Delta'],
+                            'Nifty lot_size':nifty_lot_size,
+                        
                         }
                         is_option_open=True
-                        print(current_position)
 
                 current_date+=timedelta(days=1)
                 
@@ -308,12 +377,7 @@ def get_data_multiprocessing(tickers, start_year, end_year, exposure,target_delt
 
 
 if __name__ == '__main__':
-    tickers = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "HINDUNILVR", "KOTAKBANK", "SBIN",
-           "BHARTIARTL", "ITC", "ASIANPAINT", "BAJFINANCE", "MARUTI", "AXISBANK", "LT", "HCLTECH",
-           "SUNPHARMA", "WIPRO", "ULTRACEMCO", "TITAN", "TECHM", "NESTLEIND", "JSWSTEEL", "TATASTEEL",
-           "POWERGRID", "ONGC", "COALINDIA", "INDUSINDBK", "BAJAJFINSV", "GRASIM", "CIPLA", "ADANIPORTS",
-           "TATAMOTORS", "DRREDDY", "BRITANNIA", "HEROMOTOCO", "DIVISLAB", "EICHERMOT", "SHREECEM",
-           "APOLLOHOSP", "UPL", "TATACONSUM", "BAJAJ_AUTO", "HINDALCO", "SBILIFE", "VEDL"]
+    tickers = ["RELIANCE"]
     start_year = 2019
     end_year = 2025
     exposure = 700000
@@ -326,4 +390,4 @@ if __name__ == '__main__':
 
     df_trades = get_data_multiprocessing(tickers, start_year, end_year, exposure,target_delta,dte,sl,option_type)
     df = pd.DataFrame(df_trades)
-    df.to_csv(f'stocks_trades_{target_delta}_{dte}_{sl}_{option_type}.csv', index=False)
+    df.to_csv(f'stocks_trades_{target_delta}_{dte}_{sl}_{option_type}_test.csv', index=False)
